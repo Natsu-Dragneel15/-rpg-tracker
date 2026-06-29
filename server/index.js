@@ -97,6 +97,7 @@ function buildClientState(room, playerId, opponentId) {
   return {
     phase: room.phase,
     settings: room.settings,
+    isOwner: room.ownerId === playerId,   // true only for the Defender (room owner)
     me: me ? sanitizePlayer(me, playerId, room) : null,
     opponent: opp ? sanitizePlayer(opp, opponentId, room) : null,
     currentAttacker: room.currentAttacker,
@@ -259,23 +260,28 @@ function stopWeaknessTimer(room) {
 // ─── Win Check ───────────────────────────────────────────────────────────────
 
 function checkWin(room, roomCode) {
-  if (room.phase === 'ended') return false;
+  if (room.phase === 'ended' || room.phase === 'mb') return false;
   for (const [pid, player] of Object.entries(room.players)) {
-    if (player.hp <= 0) {
+    if (player.hp <= 0 || player.status === 'MB') {
+      player.hp = 0;
+      player.status = 'MB';
+      player.stats.statusChanges++;
+
       const winnerId = getOpponent(room, pid);
       const winner = room.players[winnerId];
       room.winner = { id: winnerId, name: winner?.name || 'Unknown', role: winner?.role || 'Unknown' };
-      room.phase = 'ended';
-      room.endedAt = Date.now();
-      addLog(room, { type: 'game_over', winner: room.winner.name, message: `🏆 ${room.winner.name} wins the match!` });
-      // Clear all timers
-      Object.values(room.rTimers).forEach(t => clearInterval(t));
-      Object.values(room.bcTimers).forEach(t => clearInterval(t.intervalId));
-      if (room.weaknessState?.active) {
-        stopWeaknessTimer(room);
-        addLog(room, { type: 'weakness_ended', message: '🎯 Weakness ended — match over.' });
-        room.weaknessState.active = false;
-      }
+      room.defeatedId = pid;
+
+      // Move to 'mb' phase — match paused, waiting for owner to finish
+      room.phase = 'mb';
+
+      addLog(room, {
+        type: 'mb_triggered',
+        defeated: player.name,
+        winner: winner?.name,
+        message: `💀 ${player.name} has been defeated (MB)! ${winner?.name} wins — waiting for Room Owner to finish the round.`
+      });
+
       broadcastState(roomCode);
       return true;
     }
@@ -309,7 +315,8 @@ io.on('connection', (socket) => {
 
     const room = {
       code,
-      hostId: socket.id,
+      hostId: socket.id,   // kept for reconnect reference
+      ownerId: socket.id,   // Defender is always the owner
       phase: 'lobby',
       settings: {
         startingHp: Math.min(Math.max(parseInt(settings?.startingHp) || 100, 10), 1000),
@@ -317,9 +324,9 @@ io.on('connection', (socket) => {
         diceFaces: [4,6,8,10,12,20].includes(parseInt(settings?.diceFaces)) ? parseInt(settings.diceFaces) : 20,
         cooldownMs: Math.min(Math.max((parseFloat(settings?.cooldownMinutes) || 2) * 60 * 1000, 5000), 30 * 60 * 1000),
         protectionEnabled: settings?.protectionEnabled !== false,
-        startingStatus: STATUS_ORDER.includes(settings?.startingStatus) ? settings.startingStatus : 'N',
+        // Starting status: N if protection ON, R if protection OFF
+        startingStatus: (settings?.protectionEnabled !== false) ? 'N' : 'R',
         prize: (settings?.prize || '').slice(0, 100),
-        // Weakness settings
         weaknessDamage: Math.min(Math.max(parseInt(settings?.weaknessDamage) || 10, 1), 200),
         weaknessIntervalMinutes: Math.min(Math.max(parseFloat(settings?.weaknessIntervalMinutes) || 10, 0.1), 60)
       },
@@ -373,6 +380,7 @@ io.on('connection', (socket) => {
         room.playerOrder = room.playerOrder.map(pid => pid === existing ? socket.id : pid);
         if (room.currentAttacker === existing) room.currentAttacker = socket.id;
         if (room.weaknessState?.targetId === existing) room.weaknessState.targetId = socket.id;
+        if (room.ownerId === existing) room.ownerId = socket.id;
         if (room.disconnectTimers[existing]) {
           clearTimeout(room.disconnectTimers[existing]);
           delete room.disconnectTimers[existing];
@@ -386,11 +394,11 @@ io.on('connection', (socket) => {
     }
     if (room.phase !== 'lobby') return socket.emit('error', 'Match already started');
 
-    room.players[socket.id] = createPlayerState(name, 'defender', room.settings);
+    room.players[socket.id] = createPlayerState(name, 'attacker', room.settings);
     room.playerOrder.push(socket.id);
 
     socket.join(code);
-    socket.emit('room_joined', { code, role: 'defender', playerId: socket.id });
+    socket.emit('room_joined', { code, role: 'attacker', playerId: socket.id });
     broadcastState(code);
     io.to(code).emit('player_joined', { name });
   });
@@ -412,7 +420,7 @@ io.on('connection', (socket) => {
     const found = getRoomBySocket(socket.id);
     if (!found) return;
     const { code, room } = found;
-    if (socket.id !== room.hostId) return socket.emit('error', 'Only host can start');
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Only the room owner can start');
     if (room.playerOrder.length < 2) return socket.emit('error', 'Need 2 players');
     if (room.phase !== 'lobby') return;
     if (!room.playerOrder.every(pid => room.players[pid]?.ready)) return socket.emit('error', 'Both players must be ready');
@@ -449,6 +457,7 @@ io.on('connection', (socket) => {
       room.currentAttacker = r1 > r2 ? p1 : p2;
       room.phase = 'battle';
       room.playerOrder.forEach(pid => {
+        // If protection OFF, status starts as R — begin R timer immediately
         if (room.players[pid].status === 'R' && !room.players[pid].protection) startRTimer(room, pid, code);
       });
       addLog(room, { type: 'initiative_result', winner: room.players[room.currentAttacker].name, message: `⚔️ ${room.players[room.currentAttacker].name} goes first!` });
@@ -592,6 +601,31 @@ io.on('connection', (socket) => {
     broadcastState(code);
   });
 
+  // ── Finish Round (Owner/Defender only) ──────────────────
+  socket.on('finish_round', () => {
+    const found = getRoomBySocket(socket.id);
+    if (!found) return;
+    const { code, room } = found;
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Only the room owner can finish the round');
+    if (room.phase !== 'mb') return socket.emit('error', 'No defeated player yet');
+
+    // Stop all timers
+    Object.values(room.rTimers).forEach(t => clearInterval(t));
+    Object.values(room.bcTimers).forEach(t => clearInterval(t.intervalId));
+    if (room.weaknessState?.active) {
+      stopWeaknessTimer(room);
+      room.weaknessState.active = false;
+    }
+    room.rTimers = {};
+    room.bcTimers = {};
+
+    room.phase = 'ended';
+    room.endedAt = Date.now();
+
+    addLog(room, { type: 'game_over', winner: room.winner?.name, message: `🏆 Round finished! ${room.winner?.name} wins!` });
+    broadcastState(code);
+  });
+
   // ── Found Weakness (Attacker only, once per match) ───────
   socket.on('found_weakness', ({ note }) => {
     const found = getRoomBySocket(socket.id);
@@ -603,8 +637,8 @@ io.on('connection', (socket) => {
     const me = room.players[socket.id];
     if (!me) return;
 
-    // Only attacker can trigger weakness
-    if (me.role !== 'attacker') return socket.emit('error', 'Attacker only');
+    // Only the room owner (defender) can apply weakness
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
 
     // No stacking
     if (room.weaknessState?.active) return socket.emit('error', 'Weakness already active');
@@ -647,7 +681,7 @@ io.on('connection', (socket) => {
     const found = getRoomBySocket(socket.id);
     if (!found) return;
     const { code, room } = found;
-    if (socket.id !== room.hostId) return socket.emit('error', 'Host only');
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
     if (!room.weaknessState?.active) return;
 
     stopWeaknessTimer(room);
@@ -663,7 +697,7 @@ io.on('connection', (socket) => {
     const found = getRoomBySocket(socket.id);
     if (!found) return;
     const { code, room } = found;
-    if (socket.id !== room.hostId) return socket.emit('error', 'Host only');
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
     if (!STATUS_ORDER.includes(status)) return socket.emit('error', 'Invalid status');
 
     const targetId = room.playerOrder.find(pid => room.players[pid]?.name === targetName);
@@ -682,7 +716,7 @@ io.on('connection', (socket) => {
     const found = getRoomBySocket(socket.id);
     if (!found) return;
     const { code, room } = found;
-    if (socket.id !== room.hostId) return;
+    if (socket.id !== room.ownerId) return;
     const targetId = room.playerOrder.find(pid => room.players[pid]?.name === targetName);
     if (!targetId) return;
     room.players[targetId].protection = true;
@@ -694,7 +728,7 @@ io.on('connection', (socket) => {
     const found = getRoomBySocket(socket.id);
     if (!found) return;
     const { code, room } = found;
-    if (socket.id !== room.hostId) return;
+    if (socket.id !== room.ownerId) return;
     const [p1, p2] = room.playerOrder;
     const defender = room.players[p2] ? p2 : p1;
     if (trigger === 'word_teasing') {
