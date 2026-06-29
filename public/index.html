@@ -88,14 +88,6 @@
               <span id="protection-text">Enabled</span>
             </div>
           </div>
-          <div class="form-group">
-            <label>Weakness Damage (HP per tick)</label>
-            <input type="number" id="set-weakness-damage" value="10" min="1" max="200">
-          </div>
-          <div class="form-group">
-            <label>Weakness Interval (minutes)</label>
-            <input type="number" id="set-weakness-interval" value="10" min="0.1" max="60" step="0.1">
-          </div>
         </div>
         <button class="btn-primary full-width" onclick="createRoom()">
           🏰 Create Match
@@ -315,14 +307,18 @@
   <div id="weakness-modal" class="modal-overlay" style="display:none">
     <div class="modal-card">
       <h3>🎯 Found Weakness</h3>
-      <p>Apply a persistent Weakness debuff to your opponent. They will take damage on a repeating timer until the match ends or the host removes it.</p>
+      <p>Deal 10 bonus damage to your opponent.</p>
       <div class="form-group">
         <label>Note (optional)</label>
         <input type="text" id="weakness-note" placeholder="Describe the weakness...">
       </div>
+      <div class="form-group toggle-group">
+        <label>Apply negative status</label>
+        <input type="checkbox" id="weakness-neg-status">
+      </div>
       <div class="modal-buttons">
         <button class="btn-secondary" onclick="closeWeaknessModal()">Cancel</button>
-        <button class="btn-primary" onclick="submitWeakness()">Apply Weakness</button>
+        <button class="btn-primary" onclick="submitWeakness()">Confirm</button>
       </div>
     </div>
   </div>
