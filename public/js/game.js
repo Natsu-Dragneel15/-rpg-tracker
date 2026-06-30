@@ -83,7 +83,7 @@ function createRoom() {
     startingHp:               parseInt(document.getElementById('set-hp').value)       || 100,
     damage:                   parseInt(document.getElementById('set-damage').value)    || 25,
     diceFaces:                parseInt(document.getElementById('set-dice').value)      || 20,
-    cooldownMinutes:          parseFloat(document.getElementById('set-cooldown').value)|| 2,
+    cooldownSeconds:           parseFloat(document.getElementById('set-cooldown').value)|| 120,
     protectionEnabled:        document.getElementById('set-protection').checked,
     prize:                    document.getElementById('create-prize').value.trim()
   };
@@ -196,7 +196,7 @@ function renderLobby(state) {
     <div class="setting-item"><span class="setting-val">${s.startingHp}</span><span class="setting-key">HP</span></div>
     <div class="setting-item"><span class="setting-val">${s.damage}</span><span class="setting-key">Damage</span></div>
     <div class="setting-item"><span class="setting-val">d${s.diceFaces}</span><span class="setting-key">Dice</span></div>
-    <div class="setting-item"><span class="setting-val">${(s.cooldownMs/60000).toFixed(1)}m</span><span class="setting-key">Cooldown</span></div>
+    <div class="setting-item"><span class="setting-val">${Math.round(s.cooldownMs/1000)}s</span><span class="setting-key">Cooldown</span></div>
     <div class="setting-item"><span class="setting-val">${s.startingStatus}</span><span class="setting-key">Status</span></div>
     <div class="setting-item"><span class="setting-val">${s.protectionEnabled?'🛡️':'❌'}</span><span class="setting-key">Shield</span></div>
   `;

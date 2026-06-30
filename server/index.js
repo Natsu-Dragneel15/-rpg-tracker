@@ -277,7 +277,7 @@ io.on('connection', (socket) => {
         startingHp: Math.min(Math.max(parseInt(settings?.startingHp) || 100, 10), 1000),
         damage: Math.min(Math.max(parseInt(settings?.damage) || 25, 1), 500),
         diceFaces: [4,6,8,10,12,20].includes(parseInt(settings?.diceFaces)) ? parseInt(settings.diceFaces) : 20,
-        cooldownMs: Math.min(Math.max((parseFloat(settings?.cooldownMinutes) || 2) * 60 * 1000, 5000), 30 * 60 * 1000),
+        cooldownMs: Math.min(Math.max((parseFloat(settings?.cooldownSeconds) || 120) * 1000, 5000), 30 * 60 * 1000),
         protectionEnabled: settings?.protectionEnabled !== false,
         // Starting status: N if protection ON, R if protection OFF
         startingStatus: (settings?.protectionEnabled !== false) ? 'N' : 'R',
