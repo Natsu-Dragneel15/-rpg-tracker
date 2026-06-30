@@ -394,15 +394,30 @@ function updateCooldown(remaining, total) {
   if (remaining > 0) {
     el.style.display = 'flex';
     txt.textContent = `COOLDOWN: ${formatTime(remaining)}`;
+    setActionButtonsDisabled(true);
     let ms = remaining;
     cooldownTimer = setInterval(() => {
       ms -= 1000;
-      if (ms <= 0) { el.style.display = 'none'; clearInterval(cooldownTimer); }
-      else txt.textContent = `COOLDOWN: ${formatTime(ms)}`;
+      if (ms <= 0) {
+        el.style.display = 'none';
+        clearInterval(cooldownTimer);
+        setActionButtonsDisabled(false);
+      } else {
+        txt.textContent = `COOLDOWN: ${formatTime(ms)}`;
+      }
     }, 1000);
   } else {
     el.style.display = 'none';
+    setActionButtonsDisabled(false);
   }
+}
+
+// Re-enable attack/ability buttons once cooldown expires locally,
+// without waiting for the next server state_update broadcast.
+function setActionButtonsDisabled(disabled) {
+  document.querySelectorAll('.btn-attack, .btn-ability').forEach(btn => {
+    btn.disabled = disabled;
+  });
 }
 
 function startMatchTimer(startedAt) {
