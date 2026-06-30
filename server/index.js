@@ -42,7 +42,8 @@ function createPlayerState(name, role, settings) {
       damageDealt: 0, damageReceived: 0, statusChanges: 0
     },
     hypnoUsed: false,
-    bcUsed: false
+    bcUsed: false,
+    weaknessUsed: false
   };
 }
 
@@ -87,13 +88,6 @@ function buildClientState(room, playerId, opponentId) {
   const opp = opponentId ? room.players[opponentId] : null;
   const now = Date.now();
 
-  // Weakness countdown: how many ms until next damage tick
-  let weaknessCountdown = null;
-  if (room.weaknessState?.active) {
-    const elapsed = now - room.weaknessState.lastTickAt;
-    weaknessCountdown = Math.max(0, room.weaknessState.intervalMs - elapsed);
-  }
-
   return {
     phase: room.phase,
     settings: room.settings,
@@ -110,15 +104,7 @@ function buildClientState(room, playerId, opponentId) {
     cooldownRemaining: room.cooldownEnd[playerId] ? Math.max(0, room.cooldownEnd[playerId] - now) : 0,
     hypnoSkipsRemaining: room.hypnoState[playerId] || 0,
     playerCount: room.playerOrder.length,
-    initiativeRolls: room.initiativeRolls,
-    weaknessState: room.weaknessState ? {
-      active: room.weaknessState.active,
-      targetId: room.weaknessState.targetId,
-      targetName: room.weaknessState.targetName,
-      damage: room.weaknessState.damage,
-      intervalMs: room.weaknessState.intervalMs,
-      countdownMs: weaknessCountdown
-    } : null
+    initiativeRolls: room.initiativeRolls
   };
 }
 
@@ -209,54 +195,6 @@ function startBCTimer(room, targetId, roomCode) {
   };
 }
 
-// ─── Weakness Timer ───────────────────────────────────────────────────────────
-
-/**
- * Start the server-authoritative Weakness DoT timer.
- * weaknessState = { active, targetId, targetName, damage, intervalMs, lastTickAt, intervalHandle }
- */
-function startWeaknessTimer(room, roomCode) {
-  // Clear any existing timer
-  stopWeaknessTimer(room);
-
-  const ws = room.weaknessState;
-  if (!ws || !ws.active) return;
-
-  ws.lastTickAt = Date.now(); // reset so countdown starts fresh
-
-  ws.intervalHandle = setInterval(() => {
-    const r = rooms[roomCode];
-    if (!r || !r.weaknessState?.active) return;
-
-    const targetId = r.weaknessState.targetId;
-    const target = r.players[targetId];
-    if (!target) return;
-
-    r.weaknessState.lastTickAt = Date.now();
-
-    const dmg = applyDamage(r, targetId, r.weaknessState.damage, 'weakness_dot');
-    addLog(r, {
-      type: 'weakness_damage',
-      target: target.name,
-      damage: dmg,
-      message: `🎯 Weakness dealt ${dmg} damage to ${target.name}`
-    });
-
-    if (checkWin(r, roomCode)) {
-      stopWeaknessTimer(r);
-      return;
-    }
-    broadcastState(roomCode);
-  }, ws.intervalMs);
-}
-
-function stopWeaknessTimer(room) {
-  if (room.weaknessState?.intervalHandle) {
-    clearInterval(room.weaknessState.intervalHandle);
-    room.weaknessState.intervalHandle = null;
-  }
-}
-
 // ─── Win Check ───────────────────────────────────────────────────────────────
 
 function checkWin(room, roomCode) {
@@ -326,9 +264,7 @@ io.on('connection', (socket) => {
         protectionEnabled: settings?.protectionEnabled !== false,
         // Starting status: N if protection ON, R if protection OFF
         startingStatus: (settings?.protectionEnabled !== false) ? 'N' : 'R',
-        prize: (settings?.prize || '').slice(0, 100),
-        weaknessDamage: Math.min(Math.max(parseInt(settings?.weaknessDamage) || 10, 1), 200),
-        weaknessIntervalMinutes: Math.min(Math.max(parseFloat(settings?.weaknessIntervalMinutes) || 10, 0.1), 60)
+        prize: (settings?.prize || '').slice(0, 100)
       },
       players: {},
       playerOrder: [],
@@ -344,9 +280,7 @@ io.on('connection', (socket) => {
       bcTimers: {},
       rTimers: {},
       cooldownEnd: {},
-      disconnectTimers: {},
-      // Weakness state — single instance, no stacking
-      weaknessState: null
+      disconnectTimers: {}
     };
 
     // Creator is the Defender (Room Owner)
@@ -379,7 +313,6 @@ io.on('connection', (socket) => {
         delete room.players[existing];
         room.playerOrder = room.playerOrder.map(pid => pid === existing ? socket.id : pid);
         if (room.currentAttacker === existing) room.currentAttacker = socket.id;
-        if (room.weaknessState?.targetId === existing) room.weaknessState.targetId = socket.id;
         if (room.ownerId === existing) room.ownerId = socket.id;
         if (room.disconnectTimers[existing]) {
           clearTimeout(room.disconnectTimers[existing]);
@@ -601,6 +534,35 @@ io.on('connection', (socket) => {
     broadcastState(code);
   });
 
+  // ── Found Weakness (Defender/Owner only, once per match) ─
+  socket.on('found_weakness', () => {
+    const found = getRoomBySocket(socket.id);
+    if (!found) return;
+    const { code, room } = found;
+
+    if (room.phase !== 'battle') return socket.emit('error', 'Not in battle');
+    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
+
+    const me = room.players[socket.id]; // defender
+    if (!me) return;
+    if (me.weaknessUsed) return socket.emit('error', 'Weakness already used');
+
+    me.weaknessUsed = true;
+
+    // Defender loses 10 HP immediately
+    const dmg = applyDamage(room, socket.id, 10, 'weakness');
+
+    addLog(room, {
+      type: 'weakness',
+      player: me.name,
+      damage: dmg,
+      message: `🎯 ${me.name} acknowledged a discovered Weakness. ${me.name} lost ${dmg} HP.`
+    });
+
+    checkWin(room, code);
+    broadcastState(code);
+  });
+
   // ── Finish Round (Owner/Defender only) ──────────────────
   socket.on('finish_round', () => {
     const found = getRoomBySocket(socket.id);
@@ -612,10 +574,6 @@ io.on('connection', (socket) => {
     // Stop all timers
     Object.values(room.rTimers).forEach(t => clearInterval(t));
     Object.values(room.bcTimers).forEach(t => clearInterval(t.intervalId));
-    if (room.weaknessState?.active) {
-      stopWeaknessTimer(room);
-      room.weaknessState.active = false;
-    }
     room.rTimers = {};
     room.bcTimers = {};
 
@@ -623,72 +581,6 @@ io.on('connection', (socket) => {
     room.endedAt = Date.now();
 
     addLog(room, { type: 'game_over', winner: room.winner?.name, message: `🏆 Round finished! ${room.winner?.name} wins!` });
-    broadcastState(code);
-  });
-
-  // ── Found Weakness (Attacker only, once per match) ───────
-  socket.on('found_weakness', ({ note }) => {
-    const found = getRoomBySocket(socket.id);
-    if (!found) return;
-    const { code, room } = found;
-
-    if (room.phase !== 'battle') return socket.emit('error', 'Not in battle');
-
-    const me = room.players[socket.id];
-    if (!me) return;
-
-    // Only the room owner (defender) can apply weakness
-    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
-
-    // No stacking
-    if (room.weaknessState?.active) return socket.emit('error', 'Weakness already active');
-
-    const targetId = getOpponent(room, socket.id);
-    const target = room.players[targetId];
-    if (!target) return;
-
-    const dmgPerTick = room.settings.weaknessDamage;
-    const intervalMs = room.settings.weaknessIntervalMinutes * 60 * 1000;
-
-    // Set up weakness state
-    room.weaknessState = {
-      active: true,
-      targetId,
-      targetName: target.name,
-      damage: dmgPerTick,
-      intervalMs,
-      lastTickAt: Date.now(),
-      intervalHandle: null
-    };
-
-    startWeaknessTimer(room, code);
-
-    addLog(room, {
-      type: 'weakness_applied',
-      player: me.name,
-      target: target.name,
-      damage: dmgPerTick,
-      intervalMinutes: room.settings.weaknessIntervalMinutes,
-      note: note || '',
-      message: `🎯 ${me.name} found a weakness! ${target.name} will take ${dmgPerTick} damage every ${room.settings.weaknessIntervalMinutes} minute(s)!${note ? ` — ${note}` : ''}`
-    });
-
-    broadcastState(code);
-  });
-
-  // ── Host: Remove Weakness ────────────────────────────────
-  socket.on('remove_weakness', () => {
-    const found = getRoomBySocket(socket.id);
-    if (!found) return;
-    const { code, room } = found;
-    if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
-    if (!room.weaknessState?.active) return;
-
-    stopWeaknessTimer(room);
-    const targetName = room.weaknessState.targetName;
-    room.weaknessState.active = false;
-
-    addLog(room, { type: 'weakness_removed', message: `🎯 Host removed Weakness from ${targetName}` });
     broadcastState(code);
   });
 
@@ -773,7 +665,6 @@ io.on('connection', (socket) => {
         if (allGone) {
           Object.values(room.rTimers || {}).forEach(t => clearInterval(t));
           Object.values(room.bcTimers || {}).forEach(t => clearInterval(t.intervalId));
-          stopWeaknessTimer(room);
           delete rooms[code];
           console.log(`[Room] Cleaned up: ${code}`);
         }

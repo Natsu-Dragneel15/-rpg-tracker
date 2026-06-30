@@ -12,7 +12,6 @@ let isOwner = false;   // true when this player is the Defender (room owner)
 let lastState = null;
 let cooldownTimer = null;
 let matchTimerInterval = null;
-let weaknessCountdownInterval = null;
 let isReady = false;
 
 // ─── Particles ────────────────────────────────────────────────────────────────
@@ -86,9 +85,7 @@ function createRoom() {
     diceFaces:                parseInt(document.getElementById('set-dice').value)      || 20,
     cooldownMinutes:          parseFloat(document.getElementById('set-cooldown').value)|| 2,
     protectionEnabled:        document.getElementById('set-protection').checked,
-    prize:                    document.getElementById('create-prize').value.trim(),
-    weaknessDamage:           parseInt(document.getElementById('set-weakness-damage').value) || 10,
-    weaknessIntervalMinutes:  parseFloat(document.getElementById('set-weakness-interval').value) || 10
+    prize:                    document.getElementById('create-prize').value.trim()
   };
 
   myName = name;
@@ -122,13 +119,7 @@ function rollInitiative() { socket.emit('roll_initiative'); animateDice('my-dice
 function attack(abilityUsed) { socket.emit('attack', { abilityUsed: abilityUsed || null }); animateDice('my-dice'); }
 function defend() { socket.emit('defend'); animateDice('my-dice'); }
 
-function openWeaknessModal() { document.getElementById('weakness-modal').style.display = 'flex'; }
-function closeWeaknessModal() { document.getElementById('weakness-modal').style.display = 'none'; }
-function submitWeakness() {
-  const note = document.getElementById('weakness-note').value.trim();
-  socket.emit('found_weakness', { note });
-  closeWeaknessModal();
-}
+function useWeakness() { socket.emit('found_weakness'); }
 
 function animateDice(id) {
   const el = document.getElementById(id);
@@ -151,7 +142,6 @@ function hostRestoreProtection() {
   socket.emit('manual_restore_protection', { targetName: document.getElementById('hc-target').value });
 }
 function hostTrigger(trigger) { socket.emit('manual_trigger', { trigger }); }
-function hostRemoveWeakness() { socket.emit('remove_weakness'); }
 
 // ─── Export ───────────────────────────────────────────────────────────────────
 
@@ -209,8 +199,6 @@ function renderLobby(state) {
     <div class="setting-item"><span class="setting-val">${(s.cooldownMs/60000).toFixed(1)}m</span><span class="setting-key">Cooldown</span></div>
     <div class="setting-item"><span class="setting-val">${s.startingStatus}</span><span class="setting-key">Status</span></div>
     <div class="setting-item"><span class="setting-val">${s.protectionEnabled?'🛡️':'❌'}</span><span class="setting-key">Shield</span></div>
-    <div class="setting-item"><span class="setting-val">${s.weaknessDamage} HP</span><span class="setting-key">Weakness Dmg</span></div>
-    <div class="setting-item"><span class="setting-val">/${s.weaknessIntervalMinutes}m</span><span class="setting-key">Weakness Interval</span></div>
   `;
 
   if (isOwner) {
@@ -245,7 +233,6 @@ function renderBattle(state) {
   document.getElementById('opp-panel').classList.toggle('defeated', opp.status === 'MB');
   renderTurnIndicator(state);
   renderActions(state);
-  renderWeaknessUI(state);
 
   if (state.startedAt && !matchTimerInterval) startMatchTimer(state.startedAt);
 
@@ -385,12 +372,11 @@ function renderActions(state) {
     }
   }
 
-  // Weakness button — owner (defender) only
-  if (state.isOwner) {
-    const weaknessActive = state.weaknessState?.active;
-    const wBtn = makeBtn('🎯 Found Weakness', 'btn-weakness', openWeaknessModal);
-    wBtn.disabled = !!weaknessActive;
-    if (weaknessActive) wBtn.title = 'Weakness already active';
+  // Weakness button — Defender (Room Owner) only, one-time use
+  if (state.isOwner && me?.role === 'defender') {
+    const wBtn = makeBtn('🎯 Weakness Found', 'btn-weakness', useWeakness);
+    wBtn.disabled = !!me.weaknessUsed;
+    if (me.weaknessUsed) wBtn.textContent = '🎯 Weakness Used';
     container.appendChild(wBtn);
   }
 }
@@ -399,79 +385,6 @@ function makeBtn(text, cls, fn) {
   const btn = document.createElement('button');
   btn.textContent = text; btn.className = cls; btn.onclick = fn;
   return btn;
-}
-
-// ─── Weakness UI ──────────────────────────────────────────────────────────────
-
-function renderWeaknessUI(state) {
-  const ws = state.weaknessState;
-
-  // Update weakness panels for both sides
-  ['me', 'opp'].forEach(side => {
-    let panel = document.getElementById(`${side}-weakness-panel`);
-    if (!panel) {
-      panel = document.createElement('div');
-      panel.id = `${side}-weakness-panel`;
-      panel.className = 'weakness-panel';
-      document.getElementById(`${side}-panel`).appendChild(panel);
-    }
-
-    // Determine if this side is the weakness target
-    const playerName = side === 'me' ? state.me?.name : state.opponent?.name;
-    const isTarget = ws?.active && ws.targetName === playerName;
-
-    if (isTarget) {
-      panel.style.display = 'block';
-      panel.innerHTML = `
-        <div class="weakness-icon">🎯</div>
-        <div class="weakness-label">WEAKNESS</div>
-        <div class="weakness-sub">Next damage in</div>
-        <div class="weakness-countdown" id="${side}-weakness-countdown">--:--</div>
-        <div class="weakness-dmg">-${ws.damage} HP / ${ws.intervalMs/60000}min</div>
-      `;
-
-      // Start the local countdown display (purely cosmetic — server owns the timer)
-      startWeaknessCountdown(side, ws.countdownMs);
-
-      // Add pulsing glow to HP bar
-      document.getElementById(`${side}-hp-bar`).classList.add('weakness-glow');
-    } else {
-      panel.style.display = 'none';
-      document.getElementById(`${side}-hp-bar`).classList.remove('weakness-glow');
-    }
-  });
-
-  // Owner remove weakness button
-  const hostInner = document.querySelector('.host-inner');
-  if (hostInner && isOwner) {
-    let removeBtn = document.getElementById('hc-remove-weakness');
-    if (!removeBtn) {
-      removeBtn = document.createElement('button');
-      removeBtn.id = 'hc-remove-weakness';
-      removeBtn.textContent = '🎯 Remove Weakness';
-      removeBtn.onclick = hostRemoveWeakness;
-      hostInner.appendChild(removeBtn);
-    }
-    removeBtn.style.display = ws?.active ? 'inline-block' : 'none';
-  }
-}
-
-// Local countdown display — server is authoritative; this just animates the UI
-let weaknessCountdownTimers = {};
-
-function startWeaknessCountdown(side, remainingMs) {
-  clearInterval(weaknessCountdownTimers[side]);
-  let ms = remainingMs;
-
-  function tick() {
-    const el = document.getElementById(`${side}-weakness-countdown`);
-    if (!el) return;
-    if (ms <= 0) { el.textContent = '00:00'; return; }
-    el.textContent = formatTime(ms);
-    ms -= 1000;
-  }
-  tick();
-  weaknessCountdownTimers[side] = setInterval(tick, 1000);
 }
 
 function updateCooldown(remaining, total) {
@@ -517,7 +430,6 @@ function renderBattleLog(log) {
 
 function renderVictory(state) {
   clearInterval(matchTimerInterval);
-  Object.values(weaknessCountdownTimers).forEach(clearInterval);
   const winner = state.winner;
   document.getElementById('victory-name').textContent = winner?.name || 'Unknown';
   const isMe = state.me?.name === winner?.name;
