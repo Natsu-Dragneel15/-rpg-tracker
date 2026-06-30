@@ -231,6 +231,23 @@ function checkWin(room, roomCode) {
 
 function rollDie(faces) { return Math.floor(Math.random() * faces) + 1; }
 
+// Statuses that incur a permanent -1 dice penalty
+const PENALTY_STATUSES = ['A', 'H', 'AD', 'MB'];
+
+/**
+ * Roll a die and apply the -1 status penalty if the player's current
+ * status is A, H, AD, or MB. Returns { raw, penalty, final } so callers
+ * can log/display both values. Server-authoritative — clients never
+ * compute this themselves.
+ */
+function rollDieForPlayer(faces, player) {
+  const raw = rollDie(faces);
+  const hasPenalty = PENALTY_STATUSES.includes(player.status);
+  const penalty = hasPenalty ? 1 : 0;
+  const final = Math.max(1, raw - penalty);
+  return { raw, penalty, final };
+}
+
 function updateRollStats(player, roll) {
   player.stats.rollCount++;
   player.stats.totalRoll += roll;
@@ -372,10 +389,17 @@ io.on('connection', (socket) => {
     if (room.phase !== 'initiative') return;
     if (room.initiativeRolls[socket.id] !== undefined) return;
 
-    const roll = rollDie(room.settings.diceFaces);
+    const { raw, penalty, final: roll } = rollDieForPlayer(room.settings.diceFaces, room.players[socket.id]);
     room.initiativeRolls[socket.id] = roll;
     updateRollStats(room.players[socket.id], roll);
-    addLog(room, { type: 'initiative', player: room.players[socket.id].name, roll, message: `🎲 ${room.players[socket.id].name} rolled ${roll} for initiative` });
+    addLog(room, {
+      type: 'initiative',
+      player: room.players[socket.id].name,
+      roll, rawRoll: raw, penalty,
+      message: penalty > 0
+        ? `🎲 ${room.players[socket.id].name} rolled ${raw} for initiative. Status penalty: -${penalty}. Final roll: ${roll}.`
+        : `🎲 ${room.players[socket.id].name} rolled ${roll} for initiative`
+    });
     broadcastState(code);
 
     if (room.playerOrder.every(pid => room.initiativeRolls[pid] !== undefined)) {
@@ -419,19 +443,21 @@ io.on('connection', (socket) => {
     if (abilityUsed === 'BC' && attacker.bcUsed) return socket.emit('error', 'BC already used');
     if ((abilityUsed === 'HYPNO' || abilityUsed === 'BC') && attacker.role !== 'attacker') return socket.emit('error', 'Only attacker can use abilities');
 
-    let roll, abilitySuccess = false;
-    if (abilityUsed === 'HYPNO') { roll = rollDie(room.settings.diceFaces); abilitySuccess = roll === 6; attacker.hypnoUsed = true; }
-    else if (abilityUsed === 'BC') { roll = rollDie(room.settings.diceFaces); abilitySuccess = roll === 1; attacker.bcUsed = true; }
-    else { roll = rollDie(room.settings.diceFaces); }
+    let roll, rawRoll, penalty = 0, abilitySuccess = false;
+    if (abilityUsed === 'HYPNO') { roll = rollDie(room.settings.diceFaces); rawRoll = roll; abilitySuccess = roll === 6; attacker.hypnoUsed = true; }
+    else if (abilityUsed === 'BC') { roll = rollDie(room.settings.diceFaces); rawRoll = roll; abilitySuccess = roll === 1; attacker.bcUsed = true; }
+    else { ({ raw: rawRoll, penalty, final: roll } = rollDieForPlayer(room.settings.diceFaces, attacker)); }
 
     updateRollStats(attacker, roll);
     attacker.stats.attacks++;
 
     addLog(room, {
-      type: 'attack_roll', player: attacker.name, roll, ability: abilityUsed || null, abilitySuccess,
+      type: 'attack_roll', player: attacker.name, roll, rawRoll, penalty, ability: abilityUsed || null, abilitySuccess,
       message: abilityUsed
         ? `⚡ ${attacker.name} uses ${abilityUsed}! Rolled ${roll}${abilitySuccess ? ' — SUCCESS!' : ' — failed'}`
-        : `⚔️ ${attacker.name} attacks! Rolled ${roll}`
+        : penalty > 0
+          ? `⚔️ ${attacker.name} attacks! Rolled ${rawRoll}. Status ${attacker.status} penalty: -${penalty}. Final roll: ${roll}.`
+          : `⚔️ ${attacker.name} attacks! Rolled ${roll}`
     });
 
     if (abilityUsed === 'HYPNO') {
@@ -491,9 +517,15 @@ io.on('connection', (socket) => {
       room.hypnoState[attackerId] = hypnoSkips - 1;
       addLog(room, { type: 'hypno_skip', target: defender.name, skipsLeft: room.hypnoState[attackerId], message: `🌀 ${defender.name} is hypnotized — defense skipped! (${room.hypnoState[attackerId]} skips left)` });
     } else {
-      defRoll = rollDie(room.settings.diceFaces);
+      const { raw, penalty, final } = rollDieForPlayer(room.settings.diceFaces, defender);
+      defRoll = final;
       updateRollStats(defender, defRoll);
-      addLog(room, { type: 'defense_roll', player: defender.name, roll: defRoll, message: `🛡️ ${defender.name} defends! Rolled ${defRoll}` });
+      addLog(room, {
+        type: 'defense_roll', player: defender.name, roll: defRoll, rawRoll: raw, penalty,
+        message: penalty > 0
+          ? `🛡️ ${defender.name} defends! Rolled ${raw}. Status ${defender.status} penalty: -${penalty}. Final roll: ${defRoll}.`
+          : `🛡️ ${defender.name} defends! Rolled ${defRoll}`
+      });
     }
 
     const atkRoll = room.pendingAttack.roll;
