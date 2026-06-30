@@ -552,6 +552,10 @@ io.on('connection', (socket) => {
         defender.stats.statusChanges++;
         newStatus = 'A';
         if (!defender.protection) startRTimer(room, socket.id, code);
+      } else if (oldStatus === 'R') {
+        defender.status = 'A';
+        defender.stats.statusChanges++;
+        newStatus = 'A';
       }
 
       addLog(room, { type: 'hit', attacker: attacker.name, defender: defender.name, attackRoll: atkRoll, defenseRoll: defRoll, damage: actualDmg, newStatus, message: `💥 HIT! ${attacker.name} (${atkRoll}) beat ${defender.name} (${defRoll}) for ${actualDmg} damage!${newStatus ? ` Status → ${newStatus}` : ''}` });
