@@ -180,10 +180,8 @@
               <div class="hp-bar" id="opp-hp-bar"></div>
             </div>
           </div>
-          <div class="status-row">
-            <div class="status-badge status-N" id="opp-status">N</div>
-            <div class="status-badge combat-status" id="opp-combat-status" style="display:none"></div>
-          </div>
+          <div class="status-badge status-N" id="opp-status">N</div>
+          <div class="protection-indicator prot-on" id="opp-protection-indicator">🛡 ON</div>
           <div class="shield-wrap" id="opp-shield">
             <div class="shield-icon" id="opp-shield-icon">🛡️</div>
           </div>
@@ -236,10 +234,8 @@
               <div class="hp-bar" id="me-hp-bar"></div>
             </div>
           </div>
-          <div class="status-row">
-            <div class="status-badge status-N" id="me-status">N</div>
-            <div class="status-badge combat-status" id="me-combat-status" style="display:none"></div>
-          </div>
+          <div class="status-badge status-N" id="me-status">N</div>
+          <div class="protection-indicator prot-on" id="me-protection-indicator">🛡 ON</div>
           <div class="shield-wrap" id="me-shield">
             <div class="shield-icon" id="me-shield-icon">🛡️</div>
           </div>
@@ -266,7 +262,8 @@
           <div class="host-inner">
             <select id="hc-target"></select>
             <select id="hc-status">
-              <option value="none">— clear —</option>
+              <option value="N">N</option>
+              <option value="R">R</option>
               <option value="A">A</option>
               <option value="H">H</option>
               <option value="AD">AD</option>

@@ -223,16 +223,14 @@ function renderBattle(state) {
   updateHP('opp', opp.hp, opp.maxHp);
   setStatus('me-status', me.status);
   setStatus('opp-status', opp.status);
-  setCombatStatus('me-combat-status', me.combatStatus);
-  setCombatStatus('opp-combat-status', opp.combatStatus);
   updateShield('me', me.protection);
   updateShield('opp', opp.protection);
   renderStats('me-stats', me.stats);
   renderStats('opp-stats', opp.stats);
 
-  // Apply defeated visual if combat status is MB
-  document.getElementById('me-panel').classList.toggle('defeated', me.combatStatus === 'MB');
-  document.getElementById('opp-panel').classList.toggle('defeated', opp.combatStatus === 'MB');
+  // Defeated visual when status is MB
+  document.getElementById('me-panel').classList.toggle('defeated', me.status === 'MB');
+  document.getElementById('opp-panel').classList.toggle('defeated', opp.status === 'MB');
   renderTurnIndicator(state);
   renderActions(state);
 
@@ -272,29 +270,22 @@ function updateHP(side, hp, max) {
 
 function setStatus(elId, status) {
   const el = document.getElementById(elId);
-  el.textContent = status || 'N';
-  el.className = `status-badge status-${status || 'N'}`;
-}
-
-// Shows the combat progression badge (A/H/AD/MB) or hides it if null
-function setCombatStatus(elId, combatStatus) {
-  const el = document.getElementById(elId);
-  if (!el) return;
-  if (!combatStatus) {
-    el.style.display = 'none';
-    el.textContent = '';
-    el.className = 'status-badge combat-status';
-  } else {
-    el.style.display = 'inline-flex';
-    el.textContent = combatStatus;
-    el.className = `status-badge combat-status status-${combatStatus}`;
-  }
+  el.textContent = status;
+  el.className = `status-badge status-${status}`;
 }
 
 function updateShield(side, has) {
   const icon = document.getElementById(`${side}-shield-icon`);
-  icon.textContent = has ? '🛡️' : '💔';
-  icon.classList.toggle('broken', !has);
+  if (icon) {
+    icon.textContent = has ? '🛡️' : '💔';
+    icon.classList.toggle('broken', !has);
+  }
+  // Update the always-visible protection indicator
+  const indicator = document.getElementById(`${side}-protection-indicator`);
+  if (indicator) {
+    indicator.textContent = has ? '🛡 ON' : '🛡 OFF';
+    indicator.className = `protection-indicator ${has ? 'prot-on' : 'prot-off'}`;
+  }
 }
 
 function renderStats(elId, stats) {
@@ -339,7 +330,7 @@ function renderActions(state) {
   container.innerHTML = '';
 
   const me = state.me;
-  const isDefeated = me?.combatStatus === 'MB' || me?.hp <= 0;
+  const isDefeated = me?.status === 'MB' || me?.hp <= 0;
 
   // MB phase: only owner sees Finish Round; defeated player sees nothing
   if (state.phase === 'mb') {
