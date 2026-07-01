@@ -638,6 +638,15 @@ input[type="checkbox"]:checked + .toggle-label::after {
   letter-spacing: 2px;
 }
 
+.round-display {
+  font-family: 'Cinzel', serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--gold-bright);
+  text-shadow: var(--shadow-gold);
+}
+
 .topbar-code {
   font-family: 'Share Tech Mono', monospace;
   font-size: 0.85rem;
@@ -1365,13 +1374,29 @@ input[type="checkbox"]:checked + .toggle-label::after {
   50% { box-shadow: 0 0 20px var(--arcane-glow); }
 }
 
-/* ── Status Row (protection + combat badges side by side) ── */
-.status-row {
-  display: flex;
-  flex-direction: row;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
+/* ── Protection Indicator ────────────────────────── */
+.protection-indicator {
+  font-family: 'Cinzel', serif;
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  display: inline-block;
+  width: fit-content;
+  margin-top: 2px;
+}
+
+.protection-indicator.prot-on {
+  color: var(--frost);
+  border-color: var(--frost);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.protection-indicator.prot-off {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: transparent;
 }
 
 /* ── MB Defeated state ───────────────────────────── */

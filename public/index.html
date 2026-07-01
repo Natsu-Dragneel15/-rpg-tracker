@@ -78,6 +78,16 @@
               <span id="protection-text">ON → Status: N</span>
             </div>
           </div>
+          <div class="form-group">
+            <label>Number of Rounds</label>
+            <select id="set-rounds">
+              <option value="1" selected>1 Round</option>
+              <option value="3">3 Rounds</option>
+              <option value="5">5 Rounds</option>
+              <option value="custom">Custom...</option>
+            </select>
+            <input type="number" id="set-rounds-custom" value="1" min="1" max="99" style="display:none;margin-top:8px">
+          </div>
         </div>
         <button class="btn-primary full-width" onclick="createRoom()">
           🏰 Create Match
@@ -157,6 +167,7 @@
       <!-- Top Bar -->
       <div class="battle-topbar">
         <div class="match-timer" id="match-timer">00:00</div>
+        <div class="round-display" id="round-display">ROUND 1 / 1</div>
         <div class="topbar-code" id="battle-code"></div>
         <div class="topbar-turn" id="topbar-turn">INITIATIVE PHASE</div>
       </div>

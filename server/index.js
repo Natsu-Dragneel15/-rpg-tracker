@@ -104,7 +104,10 @@ function buildClientState(room, playerId, opponentId) {
     cooldownRemaining: room.cooldownEnd[playerId] ? Math.max(0, room.cooldownEnd[playerId] - now) : 0,
     hypnoSkipsRemaining: room.hypnoState[playerId] || 0,
     playerCount: room.playerOrder.length,
-    initiativeRolls: room.initiativeRolls
+    initiativeRolls: room.initiativeRolls,
+    currentRound: room.currentRound,
+    totalRounds: room.settings.totalRounds,
+    roundScores: room.roundScores
   };
 }
 
@@ -127,7 +130,7 @@ function sanitizePlayer(player, playerId, room) {
 
 // ─── Damage & Status Logic ────────────────────────────────────────────────────
 
-function applyDamage(room, targetId, amount, source) {
+function applyDamage(room, targetId, amount, source, roomCode) {
   const player = room.players[targetId];
   if (!player) return 0;
   const prev = player.hp;
@@ -137,16 +140,18 @@ function applyDamage(room, targetId, amount, source) {
     player.stats.damageReceived += actual;
     const attacker = getOpponent(room, targetId);
     if (attacker && room.players[attacker]) room.players[attacker].stats.damageDealt += actual;
+    // Automatically update status based on new HP percentage
+    if (roomCode) updateStatusFromHp(room, targetId, roomCode);
   }
   return actual;
 }
 
 function progressStatus(room, targetId) {
+  // Kept for manual_trigger (Word Teasing / Roomplay Corruption) only
   const player = room.players[targetId];
   if (!player) return;
   const COMBAT_ORDER = ['N', 'R', 'A', 'H', 'AD', 'MB'];
   const idx = COMBAT_ORDER.indexOf(player.status);
-  // Both N and R progress to A on first hit
   if (player.status === 'N' || player.status === 'R') {
     player.status = 'A';
   } else if (idx < COMBAT_ORDER.length - 1) {
@@ -154,6 +159,61 @@ function progressStatus(room, targetId) {
   }
   player.stats.statusChanges++;
   return player.status;
+}
+
+/**
+ * Automatically update a player's status based on their current HP %.
+ * Called after every damage event.
+ * Thresholds (based on maxHp):
+ *   > 75%  → starting status (N or R)  [no change from initial]
+ *   ≤ 75%  → A
+ *   ≤ 50%  → H
+ *   ≤ 25%  → AD
+ *   = 0    → MB
+ * Status never goes backwards.
+ */
+const HP_STATUS_TIERS = [
+  { threshold: 0,    status: 'MB' },
+  { threshold: 0.25, status: 'AD' },
+  { threshold: 0.50, status: 'H'  },
+  { threshold: 0.75, status: 'A'  },
+];
+
+function updateStatusFromHp(room, targetId, roomCode) {
+  const player = room.players[targetId];
+  if (!player || player.status === 'MB') return null;
+
+  const pct = player.maxHp > 0 ? player.hp / player.maxHp : 0;
+  let targetStatus = player.status; // default: no change
+
+  for (const tier of HP_STATUS_TIERS) {
+    if (pct <= tier.threshold) { targetStatus = tier.status; break; }
+  }
+
+  // Never go backwards (e.g. healing can't lower status)
+  const ORDER = ['N', 'R', 'A', 'H', 'AD', 'MB'];
+  const currentIdx = ORDER.indexOf(player.status);
+  const targetIdx  = ORDER.indexOf(targetStatus);
+  if (targetIdx <= currentIdx) return null; // no change
+
+  const oldStatus = player.status;
+  player.status = targetStatus;
+  player.stats.statusChanges++;
+
+  addLog(room, {
+    type: 'status_change',
+    player: player.name,
+    from: oldStatus,
+    to: targetStatus,
+    message: `📊 ${player.name}'s HP dropped — Status: ${oldStatus} → ${targetStatus}`
+  });
+
+  if (targetStatus === 'MB') {
+    player.hp = 0;
+    checkWin(room, roomCode);
+  }
+
+  return targetStatus;
 }
 
 function checkMB(room, targetId, roomCode) {
@@ -176,7 +236,7 @@ function startRTimer(room, targetId, roomCode) {
     if (!r || !r.players[targetId]) return clearInterval(r.rTimers[targetId]);
     if (r.players[targetId].status !== 'R') return clearInterval(r.rTimers[targetId]);
     if (r.players[targetId].protection) return;
-    const dmg = applyDamage(r, targetId, 5, 'R_damage');
+    const dmg = applyDamage(r, targetId, 5, 'R_damage', roomCode);
     addLog(r, { type: 'r_damage', target: r.players[targetId].name, damage: dmg, message: `🔴 R Status: ${r.players[targetId].name} took ${dmg} passive damage` });
     checkWin(r, roomCode);
     broadcastState(roomCode);
@@ -190,7 +250,7 @@ function startBCTimer(room, targetId, roomCode) {
     intervalId: setInterval(() => {
       const r = rooms[roomCode];
       if (!r || !r.players[targetId]) return;
-      const dmg = applyDamage(r, targetId, 10, 'bc_dot');
+      const dmg = applyDamage(r, targetId, 10, 'bc_dot', roomCode);
       addLog(r, { type: 'bc_damage', target: r.players[targetId].name, damage: dmg, message: `⛓️ BC Curse: ${r.players[targetId].name} took ${dmg} curse damage` });
       checkWin(r, roomCode);
       broadcastState(roomCode);
@@ -276,7 +336,8 @@ io.on('connection', (socket) => {
         protectionEnabled: settings?.protectionEnabled !== false,
         // Starting status: N if protection ON, R if protection OFF
         startingStatus: (settings?.protectionEnabled !== false) ? 'N' : 'R',
-        prize: (settings?.prize || '').slice(0, 100)
+        prize: (settings?.prize || '').slice(0, 100),
+        totalRounds: Math.min(Math.max(parseInt(settings?.totalRounds) || 1, 1), 99)
       },
       players: {},
       playerOrder: [],
@@ -288,6 +349,8 @@ io.on('connection', (socket) => {
       startedAt: null,
       endedAt: null,
       winner: null,
+      currentRound: 1,
+      roundScores: {},   // playerName → rounds won
       hypnoState: {},
       bcTimers: {},
       rTimers: {},
@@ -472,7 +535,7 @@ io.on('connection', (socket) => {
     if (abilityUsed === 'BC') {
       if (abilitySuccess) {
         defender.protection = false;
-        const dmg = applyDamage(room, getOpponent(room, socket.id), 10, 'bc_initial');
+        const dmg = applyDamage(room, getOpponent(room, socket.id), 10, 'bc_initial', code);
         startBCTimer(room, getOpponent(room, socket.id), code);
         addLog(room, { type: 'bc_success', player: attacker.name, target: defender.name, damage: dmg, message: `⛓️ BC successful! ${defender.name}'s protection broken! ${dmg} damage + ongoing curse!` });
         if (checkWin(room, code)) return;
@@ -529,27 +592,10 @@ io.on('connection', (socket) => {
     room.pendingAttack = null;
 
     if (attackHits) {
-      const oldStatus = defender.status;
-      let newStatus = null;
-
-      if (oldStatus === 'A') newStatus = progressStatus(room, socket.id);
-      else if (oldStatus === 'H') newStatus = progressStatus(room, socket.id);
-      else if (oldStatus === 'AD') {
-        newStatus = progressStatus(room, socket.id);
-        if (defender.status === 'MB') checkMB(room, socket.id, code);
-      }
-
-      const actualDmg = applyDamage(room, socket.id, room.settings.damage, 'attack');
+      const actualDmg = applyDamage(room, socket.id, room.settings.damage, 'attack', code);
       attacker.stats.hits++;
 
-      // First hit: N or R → A
-      if (oldStatus === 'N' || oldStatus === 'R') {
-        defender.status = 'A';
-        defender.stats.statusChanges++;
-        newStatus = 'A';
-      }
-
-      addLog(room, { type: 'hit', attacker: attacker.name, defender: defender.name, attackRoll: atkRoll, defenseRoll: defRoll, damage: actualDmg, newStatus, message: `💥 HIT! ${attacker.name} (${atkRoll}) beat ${defender.name} (${defRoll}) for ${actualDmg} damage!${newStatus ? ` Status → ${newStatus}` : ''}` });
+      addLog(room, { type: 'hit', attacker: attacker.name, defender: defender.name, attackRoll: atkRoll, defenseRoll: defRoll, damage: actualDmg, message: `💥 HIT! ${attacker.name} (${atkRoll}) beat ${defender.name} (${defRoll}) for ${actualDmg} damage!` });
       if (checkWin(room, code)) return;
     } else {
       attacker.stats.misses++;
@@ -577,7 +623,7 @@ io.on('connection', (socket) => {
     me.weaknessUsed = true;
 
     // Defender loses 10 HP immediately
-    const dmg = applyDamage(room, socket.id, 10, 'weakness');
+    const dmg = applyDamage(room, socket.id, 10, 'weakness', code);
 
     addLog(room, {
       type: 'weakness',
@@ -598,16 +644,60 @@ io.on('connection', (socket) => {
     if (socket.id !== room.ownerId) return socket.emit('error', 'Only the room owner can finish the round');
     if (room.phase !== 'mb') return socket.emit('error', 'No defeated player yet');
 
-    // Stop all timers
+    // Stop per-round timers
     Object.values(room.rTimers).forEach(t => clearInterval(t));
     Object.values(room.bcTimers).forEach(t => clearInterval(t.intervalId));
     room.rTimers = {};
     room.bcTimers = {};
 
-    room.phase = 'ended';
-    room.endedAt = Date.now();
+    // Award round to winner
+    const winnerName = room.winner?.name;
+    if (winnerName) room.roundScores[winnerName] = (room.roundScores[winnerName] || 0) + 1;
 
-    addLog(room, { type: 'game_over', winner: room.winner?.name, message: `🏆 Round finished! ${room.winner?.name} wins!` });
+    const roundMsg = `🏆 Round ${room.currentRound} finished! ${winnerName} wins the round!`;
+    addLog(room, { type: 'round_over', round: room.currentRound, winner: winnerName, message: roundMsg });
+
+    const moreRounds = room.currentRound < room.settings.totalRounds;
+
+    if (moreRounds) {
+      // Start next round — reset players
+      room.currentRound++;
+      room.phase = 'initiative';
+      room.initiativeRolls = {};
+      room.pendingDefense = false;
+      room.pendingAttack = null;
+      room.currentAttacker = null;
+      room.winner = null;
+      room.cooldownEnd = {};
+      room.hypnoState = {};
+
+      // Reset each player's HP, status, and per-match abilities
+      room.playerOrder.forEach(pid => {
+        const p = room.players[pid];
+        p.hp = room.settings.startingHp;
+        p.maxHp = room.settings.startingHp;
+        p.status = room.settings.startingStatus;
+        p.protection = room.settings.protectionEnabled;
+        p.hypnoUsed = false;
+        p.bcUsed = false;
+        p.weaknessUsed = false;
+        p.stats = { attacks: 0, hits: 0, misses: 0, highRoll: 0, lowRoll: 99, totalRoll: 0, rollCount: 0, damageDealt: 0, damageReceived: 0, statusChanges: 0 };
+      });
+
+      addLog(room, { type: 'round_start', round: room.currentRound, message: `⚔️ Round ${room.currentRound} begins! Roll initiative!` });
+    } else {
+      // All rounds done — find match winner by most rounds won
+      room.phase = 'ended';
+      room.endedAt = Date.now();
+
+      const scores = room.roundScores;
+      const names = Object.keys(scores);
+      const matchWinner = names.reduce((a, b) => (scores[a] || 0) >= (scores[b] || 0) ? a : b, names[0]);
+      const scoreStr = names.map(n => `${n}: ${scores[n] || 0}`).join(', ');
+
+      addLog(room, { type: 'game_over', winner: matchWinner, message: `🏆 Match over! ${matchWinner} wins! (${scoreStr})` });
+    }
+
     broadcastState(code);
   });
 

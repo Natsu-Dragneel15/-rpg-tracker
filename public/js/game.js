@@ -85,7 +85,8 @@ function createRoom() {
     diceFaces:                parseInt(document.getElementById('set-dice').value)      || 20,
     cooldownSeconds:           parseFloat(document.getElementById('set-cooldown').value)|| 120,
     protectionEnabled:        document.getElementById('set-protection').checked,
-    prize:                    document.getElementById('create-prize').value.trim()
+    prize:                    document.getElementById('create-prize').value.trim(),
+    totalRounds:              getRoundsValue()
   };
 
   myName = name;
@@ -199,6 +200,7 @@ function renderLobby(state) {
     <div class="setting-item"><span class="setting-val">${Math.round(s.cooldownMs/1000)}s</span><span class="setting-key">Cooldown</span></div>
     <div class="setting-item"><span class="setting-val">${s.startingStatus}</span><span class="setting-key">Status</span></div>
     <div class="setting-item"><span class="setting-val">${s.protectionEnabled?'🛡️':'❌'}</span><span class="setting-key">Shield</span></div>
+    <div class="setting-item"><span class="setting-val">${s.totalRounds || 1}</span><span class="setting-key">Rounds</span></div>
   `;
 
   if (isOwner) {
@@ -214,6 +216,9 @@ function renderBattle(state) {
   if (!me || !opp) return;
 
   document.getElementById('battle-code').textContent = roomCode;
+  const totalRounds = state.totalRounds || 1;
+  document.getElementById('round-display').textContent =
+    totalRounds > 1 ? `ROUND ${state.currentRound || 1} / ${totalRounds}` : '';
   document.getElementById('me-name').textContent = me.name;
   document.getElementById('me-role').textContent = me.role?.toUpperCase();
   document.getElementById('opp-name').textContent = opp.name;
@@ -466,7 +471,19 @@ function renderVictory(state) {
       <div class="victory-stat"><span class="victory-stat-val">${avg}</span><span class="victory-stat-key">Avg Roll</span></div>
     `;
   }
-  if (state.settings?.prize) document.getElementById('victory-prize').textContent = `🏆 ${state.settings.prize}`;
+
+  // Show round scores if multi-round match
+  const scores = state.roundScores;
+  const totalRounds = state.totalRounds || 1;
+  const prizeEl = document.getElementById('victory-prize');
+  if (scores && totalRounds > 1) {
+    const me = state.me?.name, opp = state.opponent?.name;
+    const myScore = scores[me] || 0, oppScore = scores[opp] || 0;
+    prizeEl.innerHTML = `<div style="font-size:1.4rem;letter-spacing:3px;margin-bottom:8px">${me} ${myScore} — ${oppScore} ${opp}</div>${state.settings?.prize ? `🏆 ${state.settings.prize}` : ''}`;
+  } else if (state.settings?.prize) {
+    prizeEl.textContent = `🏆 ${state.settings.prize}`;
+  }
+
   showScreen('victory');
 }
 
@@ -513,6 +530,13 @@ socket.on('disconnect', () => showToast('Connection lost. Reconnecting...', 'err
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
+function getRoundsValue() {
+  const sel = document.getElementById('set-rounds');
+  if (!sel) return 1;
+  if (sel.value === 'custom') return Math.max(1, parseInt(document.getElementById('set-rounds-custom').value) || 1);
+  return parseInt(sel.value) || 1;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initParticles();
   showScreen('landing');
@@ -521,5 +545,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('join-code')?.addEventListener('input', e => { e.target.value = e.target.value.toUpperCase(); });
   document.getElementById('set-protection')?.addEventListener('change', e => {
     document.getElementById('protection-text').textContent = e.target.checked ? 'ON → Status: N' : 'OFF → Status: R';
+  });
+  document.getElementById('set-rounds')?.addEventListener('change', e => {
+    document.getElementById('set-rounds-custom').style.display = e.target.value === 'custom' ? 'block' : 'none';
   });
 });
