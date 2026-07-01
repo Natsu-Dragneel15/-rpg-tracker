@@ -1365,6 +1365,15 @@ input[type="checkbox"]:checked + .toggle-label::after {
   50% { box-shadow: 0 0 20px var(--arcane-glow); }
 }
 
+/* ── Status Row (protection + combat badges side by side) ── */
+.status-row {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* ── MB Defeated state ───────────────────────────── */
 .combatant.defeated {
   opacity: 0.7;
