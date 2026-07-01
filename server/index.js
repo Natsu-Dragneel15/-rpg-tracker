@@ -32,8 +32,7 @@ function createPlayerState(name, role, settings) {
     role,
     hp: settings.startingHp || 100,
     maxHp: settings.startingHp || 100,
-    status: settings.startingStatus || 'N',   // protection status: N or R, never changes after match starts
-    combatStatus: null,                         // combat progression: null → A → H → AD → MB
+    status: settings.startingStatus || 'N',   // single status: N/R → A → H → AD → MB
     protection: settings.protectionEnabled !== false,
     ready: false,
     connected: true,
@@ -116,7 +115,6 @@ function sanitizePlayer(player, playerId, room) {
     hp: player.hp,
     maxHp: player.maxHp,
     status: player.status,
-    combatStatus: player.combatStatus,
     protection: player.protection,
     ready: player.ready,
     connected: player.connected,
@@ -146,24 +144,21 @@ function applyDamage(room, targetId, amount, source) {
 function progressStatus(room, targetId) {
   const player = room.players[targetId];
   if (!player) return;
-  // Combat progression: null → A → H → AD → MB
-  const COMBAT_ORDER = ['A', 'H', 'AD', 'MB'];
-  const current = player.combatStatus;
-  if (current === null || current === undefined) {
-    player.combatStatus = 'A';
-  } else {
-    const idx = COMBAT_ORDER.indexOf(current);
-    if (idx < COMBAT_ORDER.length - 1) {
-      player.combatStatus = COMBAT_ORDER[idx + 1];
-    }
+  const COMBAT_ORDER = ['N', 'R', 'A', 'H', 'AD', 'MB'];
+  const idx = COMBAT_ORDER.indexOf(player.status);
+  // Both N and R progress to A on first hit
+  if (player.status === 'N' || player.status === 'R') {
+    player.status = 'A';
+  } else if (idx < COMBAT_ORDER.length - 1) {
+    player.status = COMBAT_ORDER[idx + 1];
   }
   player.stats.statusChanges++;
-  return player.combatStatus;
+  return player.status;
 }
 
 function checkMB(room, targetId, roomCode) {
   const player = room.players[targetId];
-  if (!player || player.combatStatus !== 'MB') return;
+  if (!player || player.status !== 'MB') return;
   player.hp = 0;
   const attacker = getOpponent(room, targetId);
   addLog(room, {
@@ -208,9 +203,9 @@ function startBCTimer(room, targetId, roomCode) {
 function checkWin(room, roomCode) {
   if (room.phase === 'ended' || room.phase === 'mb') return false;
   for (const [pid, player] of Object.entries(room.players)) {
-    if (player.hp <= 0 || player.combatStatus === 'MB') {
+    if (player.hp <= 0 || player.status === 'MB') {
       player.hp = 0;
-      player.combatStatus = 'MB';
+      player.status = 'MB';
       player.stats.statusChanges++;
 
       const winnerId = getOpponent(room, pid);
@@ -239,15 +234,10 @@ function checkWin(room, roomCode) {
 
 function rollDie(faces) { return Math.floor(Math.random() * faces) + 1; }
 
-// Statuses that incur a permanent -1 dice penalty
-const PENALTY_STATUSES = ['A'];
-
-/**
- * Roll a die and apply the -1 penalty only if combatStatus === 'A'.
- */
+// Only Status AD applies a -1 dice penalty
 function rollDieForPlayer(faces, player) {
   const raw = rollDie(faces);
-  const hasPenalty = player.combatStatus === 'A';
+  const hasPenalty = player.status === 'AD';
   const penalty = hasPenalty ? 1 : 0;
   const final = Math.max(1, raw - penalty);
   return { raw, penalty, final };
@@ -402,7 +392,7 @@ io.on('connection', (socket) => {
       player: room.players[socket.id].name,
       roll, rawRoll: raw, penalty,
       message: penalty > 0
-        ? `🎲 ${room.players[socket.id].name} rolled ${raw} for initiative. Status penalty: -${penalty}. Final roll: ${roll}.`
+        ? `🎲 ${room.players[socket.id].name} rolled ${raw} for initiative. Status AD penalty: -${penalty}. Final roll: ${roll}.`
         : `🎲 ${room.players[socket.id].name} rolled ${roll} for initiative`
     });
     broadcastState(code);
@@ -461,7 +451,7 @@ io.on('connection', (socket) => {
       message: abilityUsed
         ? `⚡ ${attacker.name} uses ${abilityUsed}! Rolled ${roll}${abilitySuccess ? ' — SUCCESS!' : ' — failed'}`
         : penalty > 0
-          ? `⚔️ ${attacker.name} attacks! Rolled ${rawRoll}. Combat Status A penalty: -${penalty}. Final roll: ${roll}.`
+          ? `⚔️ ${attacker.name} attacks! Rolled ${rawRoll}. Status AD penalty: -${penalty}. Final roll: ${roll}.`
           : `⚔️ ${attacker.name} attacks! Rolled ${roll}`
     });
 
@@ -528,7 +518,7 @@ io.on('connection', (socket) => {
       addLog(room, {
         type: 'defense_roll', player: defender.name, roll: defRoll, rawRoll: raw, penalty,
         message: penalty > 0
-          ? `🛡️ ${defender.name} defends! Rolled ${raw}. Combat Status A penalty: -${penalty}. Final roll: ${defRoll}.`
+          ? `🛡️ ${defender.name} defends! Rolled ${raw}. Status AD penalty: -${penalty}. Final roll: ${defRoll}.`
           : `🛡️ ${defender.name} defends! Rolled ${defRoll}`
       });
     }
@@ -539,27 +529,27 @@ io.on('connection', (socket) => {
     room.pendingAttack = null;
 
     if (attackHits) {
-      const oldCombatStatus = defender.combatStatus;
+      const oldStatus = defender.status;
       let newStatus = null;
 
-      if (oldCombatStatus === 'A') newStatus = progressStatus(room, socket.id);
-      else if (oldCombatStatus === 'H') newStatus = progressStatus(room, socket.id);
-      else if (oldCombatStatus === 'AD') {
+      if (oldStatus === 'A') newStatus = progressStatus(room, socket.id);
+      else if (oldStatus === 'H') newStatus = progressStatus(room, socket.id);
+      else if (oldStatus === 'AD') {
         newStatus = progressStatus(room, socket.id);
-        if (defender.combatStatus === 'MB') checkMB(room, socket.id, code);
+        if (defender.status === 'MB') checkMB(room, socket.id, code);
       }
 
       const actualDmg = applyDamage(room, socket.id, room.settings.damage, 'attack');
       attacker.stats.hits++;
 
-      // First hit: null → A (regardless of protection status N or R)
-      if (!defender.combatStatus) {
-        defender.combatStatus = 'A';
+      // First hit: N or R → A
+      if (oldStatus === 'N' || oldStatus === 'R') {
+        defender.status = 'A';
         defender.stats.statusChanges++;
         newStatus = 'A';
       }
 
-      addLog(room, { type: 'hit', attacker: attacker.name, defender: defender.name, attackRoll: atkRoll, defenseRoll: defRoll, damage: actualDmg, newStatus, message: `💥 HIT! ${attacker.name} (${atkRoll}) beat ${defender.name} (${defRoll}) for ${actualDmg} damage!${newStatus ? ` Combat Status → ${newStatus}` : ''}` });
+      addLog(room, { type: 'hit', attacker: attacker.name, defender: defender.name, attackRoll: atkRoll, defenseRoll: defRoll, damage: actualDmg, newStatus, message: `💥 HIT! ${attacker.name} (${atkRoll}) beat ${defender.name} (${defRoll}) for ${actualDmg} damage!${newStatus ? ` Status → ${newStatus}` : ''}` });
       if (checkWin(room, code)) return;
     } else {
       attacker.stats.misses++;
@@ -627,18 +617,17 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { code, room } = found;
     if (socket.id !== room.ownerId) return socket.emit('error', 'Room owner only');
-    const COMBAT_STATUSES = ['A', 'H', 'AD', 'MB'];
-    if (!COMBAT_STATUSES.includes(status) && status !== 'none') return socket.emit('error', 'Invalid status');
+    if (!STATUS_ORDER.includes(status)) return socket.emit('error', 'Invalid status');
 
     const targetId = room.playerOrder.find(pid => room.players[pid]?.name === targetName);
     if (!targetId) return;
 
-    const old = room.players[targetId].combatStatus || 'none';
-    room.players[targetId].combatStatus = status === 'none' ? null : status;
+    const old = room.players[targetId].status;
+    room.players[targetId].status = status;
     room.players[targetId].stats.statusChanges++;
     if (status === 'MB') checkMB(room, targetId, code);
 
-    addLog(room, { type: 'manual_status', player: targetName, from: old, to: status, message: `🔧 Host changed ${targetName}'s combat status: ${old} → ${status}` });
+    addLog(room, { type: 'manual_status', player: targetName, from: old, to: status, message: `🔧 Host changed ${targetName}'s status: ${old} → ${status}` });
     broadcastState(code);
   });
 
@@ -662,12 +651,12 @@ io.on('connection', (socket) => {
     const [p1, p2] = room.playerOrder;
     const defender = room.players[p2] ? p2 : p1;
     if (trigger === 'word_teasing') {
-      const old = room.players[defender].combatStatus || 'none';
-      room.players[defender].combatStatus = 'A';
+      const old = room.players[defender].status;
+      room.players[defender].status = 'A';
       addLog(room, { type: 'manual_trigger', trigger, message: `💬 Successful Word Teasing! ${room.players[defender].name}: ${old} → A` });
     } else if (trigger === 'roomplay_corruption') {
-      const old = room.players[defender].combatStatus || 'none';
-      room.players[defender].combatStatus = 'H';
+      const old = room.players[defender].status;
+      room.players[defender].status = 'H';
       addLog(room, { type: 'manual_trigger', trigger, message: `🌀 Roomplay Corruption! ${room.players[defender].name}: ${old} → H` });
     }
     broadcastState(code);
