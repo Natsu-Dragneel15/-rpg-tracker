@@ -363,10 +363,9 @@ function renderActions(state) {
     if (state.isOwner) {
       container.appendChild(makeBtn('🏁 Finish Round', 'btn-primary', () => socket.emit('finish_round')));
     }
-    // P roll: attacker only, final round, defender protection OFF
-    if (!state.isOwner && me?.role === 'attacker' && state.pRollAvailable) {
-      const pBtn = makeBtn('✨ Roll P (need 3)', 'btn-ability', () => socket.emit('roll_p'));
-      container.appendChild(pBtn);
+    // P roll button — server already validated all conditions in pRollAvailable
+    if (state.pRollAvailable) {
+      container.appendChild(makeBtn('✨ P Attempt (need 3)', 'btn-ability', () => socket.emit('roll_p')));
     }
     return;
   }

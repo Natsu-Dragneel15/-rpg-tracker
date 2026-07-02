@@ -43,7 +43,8 @@ function createPlayerState(name, role, settings) {
     },
     hypnoUsed: false,
     bcUsed: false,
-    weaknessUsed: false
+    weaknessUsed: false,
+    pAttempted: false
   };
 }
 
@@ -109,13 +110,16 @@ function buildClientState(room, playerId, opponentId) {
     currentRound: room.currentRound,
     totalRounds: room.settings.totalRounds,
     roundScores: room.roundScores,
-    // P roll: available to attacker in mb phase, final round, defender protection OFF
-    pRollAvailable: (room.phase === 'mb') &&
-      (room.currentRound >= room.settings.totalRounds) &&
-      (() => {
-        const defId = room.playerOrder.find(pid => room.players[pid]?.role === 'defender');
-        return defId && !room.players[defId]?.protection;
-      })()
+    // P roll: available to attacker in mb phase, final round, defender protection OFF, not yet attempted
+    pRollAvailable: (() => {
+      if (room.phase !== 'mb') return false;
+      if (room.currentRound < room.settings.totalRounds) return false;
+      const me = room.players[playerId];
+      if (!me || me.role !== 'attacker') return false;
+      if (me.pAttempted) return false;
+      const defId = room.playerOrder.find(pid => room.players[pid]?.role === 'defender');
+      return defId && !room.players[defId]?.protection;
+    })()
   };
 }
 
@@ -132,6 +136,7 @@ function sanitizePlayer(player, playerId, room) {
     stats: player.stats,
     hypnoUsed: player.hypnoUsed,
     bcUsed: player.bcUsed,
+    pAttempted: player.pAttempted || false,
     pStatus: player.pStatus || false,
     cooldownEnd: room.cooldownEnd[playerId] || 0
   };
@@ -692,6 +697,9 @@ io.on('connection', (socket) => {
     const me = room.players[socket.id];
     if (!me || me.role !== 'attacker') return socket.emit('error', 'Attacker only');
 
+    // One attempt only
+    if (me.pAttempted) return socket.emit('error', 'P already attempted this match');
+
     // Must be the final round
     if (room.currentRound < room.settings.totalRounds) return socket.emit('error', 'P is only available in the final round');
 
@@ -700,6 +708,9 @@ io.on('connection', (socket) => {
     const defender = room.players[defenderId];
     if (!defender) return;
     if (defender.protection) return socket.emit('error', 'P requires Defender protection to be OFF');
+
+    // Consume the attempt regardless of outcome
+    me.pAttempted = true;
 
     // Roll — succeeds only on exactly 3
     const roll = rollDie(room.settings.diceFaces);
@@ -711,13 +722,12 @@ io.on('connection', (socket) => {
       roll,
       success,
       message: success
-        ? `✨ ${me.name} rolled ${roll} — P Status activated! Special outcome achieved!`
-        : `✨ ${me.name} attempted P — rolled ${roll}. P requires exactly 3. Failed.`
+        ? `✨ ${me.name} attempted P — Rolled ${roll}. P successful! ${defender.name} received Status P.`
+        : `✨ ${me.name} attempted P — Rolled ${roll}. P failed.`
     });
 
     if (success) {
       defender.pStatus = true;
-      addLog(room, { type: 'p_activated', target: defender.name, message: `✨ ${defender.name} has been given Status P!` });
     }
 
     broadcastState(code);
@@ -799,6 +809,7 @@ io.on('connection', (socket) => {
         p.hypnoUsed = false;
         p.bcUsed = false;
         p.weaknessUsed = false;
+        p.pAttempted = false;
         p.pStatus = false;
         p.stats = { attacks: 0, hits: 0, misses: 0, highRoll: 0, lowRoll: 99, totalRoll: 0, rollCount: 0, damageDealt: 0, damageReceived: 0, statusChanges: 0 };
       });
