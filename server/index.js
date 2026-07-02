@@ -556,6 +556,8 @@ io.on('connection', (socket) => {
     if (abilityUsed === 'HYPNO' && attacker.hypnoUsed) return socket.emit('error', 'HYPNO already used');
     if (abilityUsed === 'BC' && attacker.bcUsed) return socket.emit('error', 'BC already used');
     if ((abilityUsed === 'HYPNO' || abilityUsed === 'BC') && attacker.role !== 'attacker') return socket.emit('error', 'Only attacker can use abilities');
+    // BC requires defender protection ON — check before rolling or consuming the ability
+    if (abilityUsed === 'BC' && !defender.protection) return socket.emit('error', 'BC can only be used while the Defender\'s Protection is ON');
 
     let roll, rawRoll, penalty = 0, abilitySuccess = false;
     if (abilityUsed === 'HYPNO') { roll = rollDie(room.settings.diceFaces); rawRoll = roll; abilitySuccess = roll === 6; attacker.hypnoUsed = true; }
@@ -595,8 +597,6 @@ io.on('connection', (socket) => {
     }
 
     if (abilityUsed === 'BC') {
-      // BC can only be used when Defender's protection is currently ON
-      if (!defender.protection) return socket.emit('error', 'BC can only be used when Defender has Protection ON');
       if (abilitySuccess) {
         defender.protection = false;
         room.bcBrokenProtection = true; // flag: do NOT start normal drain
