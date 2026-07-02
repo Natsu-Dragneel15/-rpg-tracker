@@ -102,7 +102,8 @@ function buildClientState(room, playerId, opponentId) {
     startedAt: room.startedAt,
     matchDuration: room.startedAt ? now - room.startedAt : 0,
     cooldownRemaining: room.cooldownEnd[playerId] ? Math.max(0, room.cooldownEnd[playerId] - now) : 0,
-    hypnoSkipsRemaining: room.hypnoState[playerId] || 0,
+    hypnoSkipsRemaining: room.hypnoState[playerId] || 0,       // MY skips (I am the hypnotized defender)
+    oppHypnoSkipsRemaining: room.hypnoState[opponentId] || 0,  // OPPONENT's skips (they are the hypnotized defender)
     playerCount: room.playerOrder.length,
     initiativeRolls: room.initiativeRolls,
     currentRound: room.currentRound,
@@ -333,6 +334,36 @@ function updateRollStats(player, roll) {
   if (roll < player.stats.lowRoll) player.stats.lowRoll = roll;
 }
 
+/**
+ * Automatically apply a HYPNO attack (no defender roll).
+ * skipNumber: 1 or 2 (which skip this is out of 2)
+ */
+function applyHypnoAttack(room, attackerId, defenderId, roomCode, skipNumber) {
+  const attacker = room.players[attackerId];
+  const defender = room.players[defenderId];
+  if (!attacker || !defender) return;
+
+  // Consume one skip
+  room.hypnoState[defenderId] = Math.max(0, (room.hypnoState[defenderId] || 1) - 1);
+  const skipsLeft = room.hypnoState[defenderId];
+
+  const dmg = applyDamage(room, defenderId, room.settings.damage, 'hypno_attack', roomCode);
+  attacker.stats.hits++;
+  attacker.stats.attacks++;
+
+  addLog(room, {
+    type: 'hypno_hit',
+    attacker: attacker.name,
+    defender: defender.name,
+    skipNumber,
+    skipsLeft,
+    damage: dmg,
+    message: `🌀 HYPNO — Defense skipped (${skipNumber}/2)! ${attacker.name} automatically hits ${defender.name} for ${dmg} damage.${skipsLeft === 0 ? ' HYPNO effect ended.' : ''}`
+  });
+
+  checkWin(room, roomCode);
+}
+
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
@@ -545,11 +576,17 @@ io.on('connection', (socket) => {
 
     if (abilityUsed === 'HYPNO') {
       if (abilitySuccess) {
-        room.hypnoState[socket.id] = 2;
-        addLog(room, { type: 'hypno_success', player: attacker.name, message: `🌀 HYPNO successful! ${defender.name} will skip the next 2 defense rolls!` });
-        room.pendingAttack = { attackerId: socket.id, roll, abilityUsed: 'HYPNO' };
-        room.pendingDefense = true;
+        const defenderId = getOpponent(room, socket.id);
+        // Store remaining skips on the DEFENDER (keyed by defender's id)
+        room.hypnoState[defenderId] = 2;
+        addLog(room, {
+          type: 'hypno_success', player: attacker.name, target: defender.name,
+          message: `🌀 HYPNO successful! ${attacker.name} rolled 6. ${defender.name} is hypnotized — next 2 defenses will be skipped.`
+        });
+        // Auto-apply first hypno attack immediately (no defender click needed)
+        applyHypnoAttack(room, socket.id, defenderId, code, 1);
       } else {
+        addLog(room, { type: 'hypno_fail', player: attacker.name, roll, message: `🌀 HYPNO failed — ${attacker.name} rolled ${roll}. No effect.` });
         room.cooldownEnd[socket.id] = now + room.settings.cooldownMs;
         passTurn(room, code);
       }
@@ -576,6 +613,18 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // If defender has HYPNO skips remaining, auto-hit without pending defense
+    const defenderId = getOpponent(room, socket.id);
+    const skipsOnDefender = room.hypnoState[defenderId] || 0;
+    if (skipsOnDefender > 0) {
+      const skipNumber = 3 - skipsOnDefender; // skip 1 = used 1 of 2, skip 2 = used 2 of 2
+      applyHypnoAttack(room, socket.id, defenderId, code, skipNumber);
+      room.cooldownEnd[socket.id] = now + room.settings.cooldownMs;
+      passTurn(room, code);
+      broadcastState(code);
+      return;
+    }
+
     room.pendingAttack = { attackerId: socket.id, roll };
     room.pendingDefense = true;
     broadcastState(code);
@@ -595,14 +644,9 @@ io.on('connection', (socket) => {
     if (!defender || !attacker) return;
 
     const now = Date.now();
-    const hypnoSkips = room.hypnoState[attackerId] || 0;
     let defRoll;
 
-    if (hypnoSkips > 0) {
-      defRoll = 0;
-      room.hypnoState[attackerId] = hypnoSkips - 1;
-      addLog(room, { type: 'hypno_skip', target: defender.name, skipsLeft: room.hypnoState[attackerId], message: `🌀 ${defender.name} is hypnotized — defense skipped! (${room.hypnoState[attackerId]} skips left)` });
-    } else {
+    {
       const { raw, penalty, final } = rollDieForPlayer(room.settings.diceFaces, defender);
       defRoll = final;
       updateRollStats(defender, defRoll);

@@ -236,6 +236,27 @@ function renderBattle(state) {
   // Defeated visual when status is MB
   document.getElementById('me-panel').classList.toggle('defeated', me.status === 'MB');
   document.getElementById('opp-panel').classList.toggle('defeated', opp.status === 'MB');
+
+  // HYPNO indicator — show on the panel of the hypnotized player
+  const mySkips = state.hypnoSkipsRemaining || 0;
+  const oppSkips = state.oppHypnoSkipsRemaining || 0;
+
+  ['me', 'opp'].forEach(side => {
+    const skips = side === 'me' ? mySkips : oppSkips;
+    let hypnoEl = document.getElementById(`${side}-hypno-indicator`);
+    if (!hypnoEl) {
+      hypnoEl = document.createElement('div');
+      hypnoEl.id = `${side}-hypno-indicator`;
+      hypnoEl.className = 'hypno-indicator';
+      document.getElementById(`${side}-panel`).appendChild(hypnoEl);
+    }
+    if (skips > 0) {
+      hypnoEl.style.display = 'block';
+      hypnoEl.textContent = `🌀 HYPNO ACTIVE — Defenses Remaining to Skip: ${skips}`;
+    } else {
+      hypnoEl.style.display = 'none';
+    }
+  });
   renderTurnIndicator(state);
   renderActions(state);
 
@@ -384,12 +405,6 @@ function renderActions(state) {
 
   if (!state.myTurn && state.pendingDefense) {
     container.appendChild(makeBtn('🛡️ Roll Defense', 'btn-defend', defend));
-    if (state.hypnoSkipsRemaining > 0) {
-      const info = document.createElement('div');
-      info.className = 'hypno-indicator';
-      info.textContent = `🌀 HYPNOSIS ACTIVE — ${state.hypnoSkipsRemaining} SKIPS REMAINING`;
-      container.appendChild(info);
-    }
   }
 
   // Weakness button — Defender (Room Owner) only, one-time use
