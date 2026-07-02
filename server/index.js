@@ -107,7 +107,14 @@ function buildClientState(room, playerId, opponentId) {
     initiativeRolls: room.initiativeRolls,
     currentRound: room.currentRound,
     totalRounds: room.settings.totalRounds,
-    roundScores: room.roundScores
+    roundScores: room.roundScores,
+    // P roll: available to attacker in mb phase, final round, defender protection OFF
+    pRollAvailable: (room.phase === 'mb') &&
+      (room.currentRound >= room.settings.totalRounds) &&
+      (() => {
+        const defId = room.playerOrder.find(pid => room.players[pid]?.role === 'defender');
+        return defId && !room.players[defId]?.protection;
+      })()
   };
 }
 
@@ -124,6 +131,7 @@ function sanitizePlayer(player, playerId, room) {
     stats: player.stats,
     hypnoUsed: player.hypnoUsed,
     bcUsed: player.bcUsed,
+    pStatus: player.pStatus || false,
     cooldownEnd: room.cooldownEnd[playerId] || 0
   };
 }
@@ -229,17 +237,32 @@ function checkMB(room, targetId, roomCode) {
   });
 }
 
-function startRTimer(room, targetId, roomCode) {
-  if (room.rTimers[targetId]) return;
-  room.rTimers[targetId] = setInterval(() => {
+/**
+ * Start the protection-based HP drain.
+ * Fires only when protection was OFF at match start.
+ * Damages BOTH players 5 HP every 5 minutes simultaneously.
+ * This timer is stored as room.protectionDrainTimer (one timer for the room).
+ * BC does NOT start this timer — BC has its own separate bcTimer.
+ */
+function startProtectionDrainTimer(room, roomCode) {
+  if (room.protectionDrainTimer) return; // already running
+  room.protectionDrainTimer = setInterval(() => {
     const r = rooms[roomCode];
-    if (!r || !r.players[targetId]) return clearInterval(r.rTimers[targetId]);
-    if (r.players[targetId].status !== 'R') return clearInterval(r.rTimers[targetId]);
-    if (r.players[targetId].protection) return;
-    const dmg = applyDamage(r, targetId, 5, 'R_damage', roomCode);
-    addLog(r, { type: 'r_damage', target: r.players[targetId].name, damage: dmg, message: `🔴 R Status: ${r.players[targetId].name} took ${dmg} passive damage` });
-    checkWin(r, roomCode);
-    broadcastState(roomCode);
+    if (!r || r.phase === 'ended') { clearInterval(r?.protectionDrainTimer); return; }
+    let anyDamage = false;
+    r.playerOrder.forEach(pid => {
+      const p = r.players[pid];
+      if (!p) return;
+      const dmg = applyDamage(r, pid, 5, 'protection_drain', roomCode);
+      if (dmg > 0) {
+        anyDamage = true;
+        addLog(r, { type: 'protection_drain', target: p.name, damage: dmg, message: `🔴 Protection OFF: ${p.name} lost ${dmg} HP` });
+      }
+    });
+    if (anyDamage) {
+      checkWin(r, roomCode);
+      broadcastState(roomCode);
+    }
   }, 5 * 60 * 1000);
 }
 
@@ -354,6 +377,8 @@ io.on('connection', (socket) => {
       hypnoState: {},
       bcTimers: {},
       rTimers: {},
+      protectionDrainTimer: null,   // room-wide 5HP/5min drain when protection OFF at start
+      bcBrokenProtection: false,    // true if BC broke protection mid-match (suppresses normal drain)
       cooldownEnd: {},
       disconnectTimers: {}
     };
@@ -471,10 +496,10 @@ io.on('connection', (socket) => {
       }
       room.currentAttacker = r1 > r2 ? p1 : p2;
       room.phase = 'battle';
-      room.playerOrder.forEach(pid => {
-        // R timer triggers if protection status is R (protection was disabled at match start)
-        if (room.players[pid].status === 'R' && !room.players[pid].protection) startRTimer(room, pid, code);
-      });
+      // If protection was OFF at match start, begin 5HP/5min drain for both players
+      if (!room.settings.protectionEnabled) {
+        startProtectionDrainTimer(room, code);
+      }
       addLog(room, { type: 'initiative_result', winner: room.players[room.currentAttacker].name, message: `⚔️ ${room.players[room.currentAttacker].name} goes first!` });
       broadcastState(code);
     }
@@ -533,10 +558,13 @@ io.on('connection', (socket) => {
     }
 
     if (abilityUsed === 'BC') {
+      // BC can only be used when Defender's protection is currently ON
+      if (!defender.protection) return socket.emit('error', 'BC can only be used when Defender has Protection ON');
       if (abilitySuccess) {
         defender.protection = false;
+        room.bcBrokenProtection = true; // flag: do NOT start normal drain
         const dmg = applyDamage(room, getOpponent(room, socket.id), 10, 'bc_initial', code);
-        startBCTimer(room, getOpponent(room, socket.id), code);
+        startBCTimer(room, getOpponent(room, socket.id), code); // 10 HP/5min to defender only
         addLog(room, { type: 'bc_success', player: attacker.name, target: defender.name, damage: dmg, message: `⛓️ BC successful! ${defender.name}'s protection broken! ${dmg} damage + ongoing curse!` });
         if (checkWin(room, code)) return;
       } else {
@@ -607,6 +635,50 @@ io.on('connection', (socket) => {
     broadcastState(code);
   });
 
+  // ── Roll P (Attacker only, mb phase, final round, defender protection OFF) ──
+  socket.on('roll_p', () => {
+    const found = getRoomBySocket(socket.id);
+    if (!found) return;
+    const { code, room } = found;
+
+    // Must be in mb phase
+    if (room.phase !== 'mb') return socket.emit('error', 'P is only available after MB');
+
+    // Only attacker can roll P
+    const me = room.players[socket.id];
+    if (!me || me.role !== 'attacker') return socket.emit('error', 'Attacker only');
+
+    // Must be the final round
+    if (room.currentRound < room.settings.totalRounds) return socket.emit('error', 'P is only available in the final round');
+
+    // Defender's protection must be OFF
+    const defenderId = room.playerOrder.find(pid => room.players[pid]?.role === 'defender');
+    const defender = room.players[defenderId];
+    if (!defender) return;
+    if (defender.protection) return socket.emit('error', 'P requires Defender protection to be OFF');
+
+    // Roll — succeeds only on exactly 3
+    const roll = rollDie(room.settings.diceFaces);
+    const success = roll === 3;
+
+    addLog(room, {
+      type: 'p_roll',
+      player: me.name,
+      roll,
+      success,
+      message: success
+        ? `✨ ${me.name} rolled ${roll} — P Status activated! Special outcome achieved!`
+        : `✨ ${me.name} attempted P — rolled ${roll}. P requires exactly 3. Failed.`
+    });
+
+    if (success) {
+      defender.pStatus = true;
+      addLog(room, { type: 'p_activated', target: defender.name, message: `✨ ${defender.name} has been given Status P!` });
+    }
+
+    broadcastState(code);
+  });
+
   // ── Found Weakness (Defender/Owner only, once per match) ─
   socket.on('found_weakness', () => {
     const found = getRoomBySocket(socket.id);
@@ -647,6 +719,7 @@ io.on('connection', (socket) => {
     // Stop per-round timers
     Object.values(room.rTimers).forEach(t => clearInterval(t));
     Object.values(room.bcTimers).forEach(t => clearInterval(t.intervalId));
+    if (room.protectionDrainTimer) { clearInterval(room.protectionDrainTimer); room.protectionDrainTimer = null; }
     room.rTimers = {};
     room.bcTimers = {};
 
@@ -670,6 +743,7 @@ io.on('connection', (socket) => {
       room.winner = null;
       room.cooldownEnd = {};
       room.hypnoState = {};
+      room.bcBrokenProtection = false;
 
       // Reset each player's HP, status, and per-match abilities
       room.playerOrder.forEach(pid => {
@@ -681,6 +755,7 @@ io.on('connection', (socket) => {
         p.hypnoUsed = false;
         p.bcUsed = false;
         p.weaknessUsed = false;
+        p.pStatus = false;
         p.stats = { attacks: 0, hits: 0, misses: 0, highRoll: 0, lowRoll: 99, totalRoll: 0, rollCount: 0, damageDealt: 0, damageReceived: 0, statusChanges: 0 };
       });
 
@@ -782,6 +857,7 @@ io.on('connection', (socket) => {
         if (allGone) {
           Object.values(room.rTimers || {}).forEach(t => clearInterval(t));
           Object.values(room.bcTimers || {}).forEach(t => clearInterval(t.intervalId));
+          if (room.protectionDrainTimer) clearInterval(room.protectionDrainTimer);
           delete rooms[code];
           console.log(`[Room] Cleaned up: ${code}`);
         }

@@ -337,10 +337,15 @@ function renderActions(state) {
   const me = state.me;
   const isDefeated = me?.status === 'MB' || me?.hp <= 0;
 
-  // MB phase: only owner sees Finish Round; defeated player sees nothing
+  // MB phase: only owner sees Finish Round; attacker may see P roll
   if (state.phase === 'mb') {
     if (state.isOwner) {
       container.appendChild(makeBtn('🏁 Finish Round', 'btn-primary', () => socket.emit('finish_round')));
+    }
+    // P roll: attacker only, final round, defender protection OFF
+    if (!state.isOwner && me?.role === 'attacker' && state.pRollAvailable) {
+      const pBtn = makeBtn('✨ Roll P (need 3)', 'btn-ability', () => socket.emit('roll_p'));
+      container.appendChild(pBtn);
     }
     return;
   }
@@ -370,7 +375,9 @@ function renderActions(state) {
       }
       if (!me.bcUsed) {
         const bc = makeBtn('⛓️ BC Curse (roll 1)', 'btn-ability', () => attack('BC'));
-        bc.disabled = cooldown; container.appendChild(bc);
+        bc.disabled = cooldown || !state.opponent?.protection; // BC needs defender protection ON
+        if (!state.opponent?.protection) bc.title = 'BC requires Defender to have Protection ON';
+        container.appendChild(bc);
       }
     }
   }
@@ -449,6 +456,8 @@ function renderBattleLog(log) {
       :entry.type?.includes('status')||entry.type?.includes('trigger')?'status'
       :entry.type==='game_over'?'game_over'
       :entry.type?.includes('weakness')?'weakness'
+      :entry.type==='p_roll'?'p_roll'
+      :entry.type==='p_activated'?'p_activated'
       :entry.type?.includes('bc')||entry.type?.includes('hypno')?'ability':'';
     div.className = `log-entry ${typeClass}`;
     div.innerHTML = `<span class="log-time">${new Date(entry.timestamp).toLocaleTimeString()}</span><span class="log-msg">${entry.message}</span>`;

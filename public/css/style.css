@@ -1426,6 +1426,8 @@ input[type="checkbox"]:checked + .toggle-label::after {
 
 /* Weakness log entry */
 .log-entry.weakness .log-msg { color: #fb923c; }
+/* P status log entry */
+.log-entry.p_roll .log-msg, .log-entry.p_activated .log-msg { color: #e879f9; }
 
 /* ── Responsive ──────────────────────────────────── */
 @media (max-width: 768px) {
